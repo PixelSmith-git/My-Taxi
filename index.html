@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="si">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#10243a">
+<title>GPS Taxi Meter</title>
+
+<link rel="stylesheet"
+href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+
+<style>
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    font-family: Arial, sans-serif;
+    background: #f2f5f8;
+    color: #172536;
+}
+
+header {
+    background: #10243a;
+    color: white;
+    text-align: center;
+    padding: 18px;
+}
+
+.card {
+    background: white;
+    margin: 12px;
+    padding: 15px;
+    border-radius: 15px;
+    box-shadow: 0 3px 12px #0001;
+}
+
+#map {
+    height: 300px;
+    border-radius: 12px;
+}
+
+.stats {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+}
+
+.stat {
+    background: #f2f5f8;
+    padding: 15px;
+    border-radius: 12px;
+}
+
+.value {
+    font-size: 25px;
+    font-weight: bold;
+}
+
+button {
+    border: none;
+    padding: 15px;
+    border-radius: 10px;
+    color: white;
+    font-size: 16px;
+    font-weight: bold;
+    width: 100%;
+    margin-top: 10px;
+}
+
+#start {
+    background: #159b62;
+}
+
+#stop {
+    background: #d94343;
+}
+
+button:disabled {
+    opacity: .4;
+}
+
+input, select {
+    width: 100%;
+    padding: 12px;
+    margin: 5px 0 12px;
+    border: 1px solid #ccc;
+    border-radius: 8px;
+}
+</style>
+</head>
+
+<body>
+
+<header>
+<h2>🚕 GPS TAXI METER</h2>
+<p>Live GPS Distance & Fare Calculator</p>
+</header>
+
+<div class="card">
+<div id="map"></div>
+</div>
+
+<div class="card">
+
+<div class="stats">
+
+<div class="stat">
+Distance
+<div class="value">
+<span id="distance">0.00</span> km
+</div>
+</div>
+
+<div class="stat">
+Duration
+<div class="value" id="duration">00:00</div>
+</div>
+
+<div class="stat">
+Total Fare
+<div class="value">
+Rs. <span id="fare">0</span>
+</div>
+</div>
+
+<div class="stat">
+GPS Accuracy
+<div class="value">
+<span id="accuracy">--</span> m
+</div>
+</div>
+
+</div>
+
+<button id="start">▶ START RIDE</button>
+<button id="stop" disabled>■ STOP RIDE</button>
+
+<button id="reset" style="background:#34495e">
+RESET
+</button>
+
+<p id="status">GPS Ready</p>
+
+</div>
+
+<div class="card">
+
+<h3>Fare Settings</h3>
+
+<label>First KM</label>
+<input id="baseKm" type="number" value="2">
+
+<label>First Distance Fare</label>
+<input id="baseFare" type="number" value="250">
+
+<label>Additional KM Price</label>
+<input id="extraRate" type="number" value="70">
+
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+
+let map = L.map('map').setView([7.957,80.760],15);
+
+L.tileLayer(
+'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+{
+maxZoom:19,
+attribution:'© OpenStreetMap'
+}
+).addTo(map);
+
+let marker = null;
+let line = L.polyline([],{
+color:'blue',
+weight:5
+}).addTo(map);
+
+let watchId = null;
+let running = false;
+let totalKm = 0;
+let lastPoint = null;
+let startAt = null;
+let timer = null;
+let pointCount = 0;
+let path = [];
+
+function distanceBetween(a,b) {
+
+const R = 6371000;
+
+const rad = x => x * Math.PI / 180;
+
+const dLat = rad(b.lat-a.lat);
+const dLon = rad(b.lng-a.lng);
+
+const x =
+Math.sin(dLat/2)**2 +
+Math.cos(rad(a.lat)) *
+Math.cos(rad(b.lat)) *
+Math.sin(dLon/2)**2;
+
+return R * 2 * Math.asin(Math.sqrt(x));
+
+}
+
+function calculateFare() {
+
+let baseKm = Number(document.getElementById('baseKm').value);
+let baseFare = Number(document.getElementById('baseFare').value);
+let rate = Number(document.getElementById('extraRate').value);
+
+if(totalKm === 0) return 0;
+
+if(totalKm <= baseKm) return baseFare;
+
+return Math.round(
+baseFare + (totalKm-baseKm)*rate
+);
+
+}
+
+function updateDisplay() {
+
+document.getElementById('distance').textContent =
+totalKm.toFixed(2);
+
+document.getElementById('fare').textContent =
+calculateFare();
+
+document.getElementById('accuracy').textContent =
+window.lastAccuracy || '--';
+
+}
+
+function positionUpdate(position) {
+
+let lat = position.coords.latitude;
+let lng = position.coords.longitude;
+
+let current = {
+lat:lat,
+lng:lng
+};
+
+window.lastAccuracy =
+Math.round(position.coords.accuracy);
+
+if(marker) {
+marker.setLatLng([lat,lng]);
+} else {
+marker = L.marker([lat,lng]).addTo(map);
+}
+
+if(running) {
+
+if(position.coords.accuracy > 60) return;
+
+if(lastPoint) {
+
+let meters = distanceBetween(lastPoint,current);
+
+let elapsed = Math.max(
+1,
+(position.timestamp-lastPoint.time)/1000
+);
+
+let speed = meters/elapsed;
+
+if(meters >= 4 && speed < 45) {
+
+totalKm += meters/1000;
+
+path.push([lat,lng]);
+
+line.setLatLngs(path);
+
+lastPoint = {
+lat:lat,
+lng:lng,
+time:position.timestamp
+};
+
+pointCount++;
+
+}
+
+} else {
+
+lastPoint = {
+lat:lat,
+lng:lng,
+time:position.timestamp
+};
+
+path.push([lat,lng]);
+
+}
+
+map.panTo([lat,lng]);
+
+document.getElementById('status').textContent =
+'Ride Running';
+
+updateDisplay();
+
+} else {
+
+map.panTo([lat,lng]);
+
+}
+
+}
+
+function gpsError(error) {
+
+document.getElementById('status').textContent =
+'GPS Error: Check Location Permission';
+
+}
+
+function updateTimer() {
+
+if(!startAt) return;
+
+let seconds = Math.floor(
+(Date.now()-startAt)/1000
+);
+
+let minutes = Math.floor(seconds/60);
+
+seconds %= 60;
+
+document.getElementById('duration').textContent =
+String(minutes).padStart(2,'0')+':' +
+String(seconds).padStart(2,'0');
+
+}
+
+document.getElementById('start').onclick = function() {
+
+if(!navigator.geolocation) {
+alert('GPS not supported');
+return;
+}
+
+if(!window.isSecureContext) {
+alert('HTTPS required. Upload
